@@ -1,0 +1,172 @@
+import streamlit as st
+import re
+from openai import OpenAI
+from plot import plot_function
+from websearch import simple_web_search
+from pdf_utils import read_pdf
+import io
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from datetime import datetime
+
+# ✅ Configuration OpenRouter avec GROK-4
+client = OpenAI(
+    api_key="ssk-or-v1-5376daf052dea0d8e7703d1c7167a1561df54cb8017644481efcc2629f7c13b0",
+    base_url="https://openrouter.ai/api/v1"
+)
+
+# ✅ Interface Streamlit
+st.set_page_config(page_title="Chatbot Intelligent + PDF + Web + Graphe", layout="centered")
+st.title("🤖 Chatbot Intelligent (Grok-4) avec Fonctions Étendues")
+
+# 🔁 Historique
+if 'messages' not in st.session_state:
+    st.session_state['messages'] = []
+
+# 🎛️ Paramètres dans la sidebar
+st.sidebar.title("⚙️ Paramètres")
+temperature = st.sidebar.slider("Température", 0.0, 2.0, 0.7)
+max_tokens = st.sidebar.slider("Max Tokens", 1, 4096, 512)
+use_web_search = st.sidebar.checkbox("🔎 Rechercher sur le Web")
+
+# 📤 Export PDF
+st.sidebar.markdown("---")
+st.sidebar.subheader("📤 Exporter les réponses")
+if st.sidebar.button("📥 Télécharger"):
+
+    content = ""
+    for msg in st.session_state['messages']:
+        role = "👤 Utilisateur" if msg["role"] == "user" else "🤖 Assistant"
+        content += f"{role}:\n{msg['content']}\n\n"
+
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    y = height - 40
+    for line in content.splitlines():
+        if y < 40:
+            pdf.showPage()
+            y = height - 40
+        pdf.drawString(40, y, line)
+        y -= 15
+    pdf.save()
+    buffer.seek(0)
+    st.sidebar.download_button(
+        label="⬇️ Télécharger .pdf",
+        data=buffer,
+        file_name=f"conversation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+        mime="application/pdf"
+    )
+
+# 📎 Upload PDF
+uploaded_file = st.file_uploader("📎 Uploadez un fichier PDF (facultatif)", type=["pdf"])
+pdf_text = ""
+if uploaded_file:
+    st.success("✅ PDF chargé avec succès.")
+    pdf_text = read_pdf(uploaded_file)
+    with st.expander("📖 Voir contenu extrait du PDF"):
+        st.text_area("Contenu PDF", value=pdf_text, height=300)
+
+# 💬 Historique avec édition
+edited_index = None
+for i, message in enumerate(st.session_state['messages']):
+    with st.chat_message(message['role']):
+        if message["role"] == "user":
+            st.markdown(f"👤 {message['content']}")
+            if st.button(f"✏️ Modifier", key=f"edit_{i}"):
+                st.session_state["edited_index"] = i
+                st.rerun()
+        else:
+            st.markdown(f"🤖 {message['content']}")
+
+# ✏️ Édition active
+if "edited_index" in st.session_state:
+    edited_index = st.session_state["edited_index"]
+    old_msg = st.session_state['messages'][edited_index]["content"]
+    edited_text = st.text_area("✏️ Modifiez votre message :", value=old_msg, key="editor")
+    if st.button("✅ Confirmer la modification"):
+        st.session_state['messages'][edited_index]["content"] = edited_text
+        if edited_index + 1 < len(st.session_state['messages']) and st.session_state['messages'][edited_index + 1]["role"] == "assistant":
+            del st.session_state['messages'][edited_index + 1]
+        st.session_state["modified_index"] = edited_index
+        del st.session_state["edited_index"]
+        st.rerun()
+
+# 🔁 Recalcul après modification
+if "modified_index" in st.session_state:
+    idx = st.session_state["modified_index"]
+    del st.session_state["modified_index"]
+
+    with st.chat_message("user"):
+        st.markdown(st.session_state["messages"][idx]["content"])
+
+    with st.chat_message("assistant"):
+        stream = client.chat.completions.create(
+            model="x-ai/grok-4",
+            messages=st.session_state["messages"][:idx + 1],
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+            extra_headers={
+                "HTTP-Referer": "http://localhost",
+                "X-Title": "Chatbot Intelligent Khalil"
+            },
+            extra_body={}
+        )
+        response = st.write_stream(stream)
+
+    st.session_state["messages"].append({"role": "assistant", "content": response})
+
+# 📥 Entrée utilisateur
+if prompt := st.chat_input("Pose ta question ou entre une fonction (ex: y = x^2)"):
+    st.session_state['messages'].append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    plotted = False
+    match = re.search(r'y\s*=\s*(.+)', prompt)
+    if match:
+        expr = match.group(1).strip()
+        plotted = plot_function(expr)
+
+    if not plotted:
+        with st.chat_message("assistant"):
+            if use_web_search:
+                result = simple_web_search(prompt)
+                st.markdown(result)
+                response = result
+            elif pdf_text.strip():
+                messages = [
+                    {"role": "system", "content": "Tu es un expert qui répond à des questions sur un document PDF."},
+                    {"role": "user", "content": f"Voici le document :\n{pdf_text}"},
+                    {"role": "user", "content": prompt}
+                ]
+                stream = client.chat.completions.create(
+                    model="x-ai/grok-4",
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=True,
+                    extra_headers={
+                        "HTTP-Referer": "http://localhost",
+                        "X-Title": "Chatbot Intelligent Khalil"
+                    },
+                    extra_body={}
+                )
+                response = st.write_stream(stream)
+            else:
+                stream = client.chat.completions.create(
+                    model="z-ai/glm-4.5-air:free",
+                    messages=st.session_state['messages'],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=True,
+                    extra_headers={
+                        "HTTP-Referer": "http://localhost",
+                        "X-Title": "Chatbot Intelligent Khalil"
+                    },
+                    extra_body={}
+                )
+                response = st.write_stream(stream)
+
+        st.session_state['messages'].append({"role": "assistant", "content": response})
